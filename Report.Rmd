@@ -1,0 +1,356 @@
+---
+title: "Predicting readmission probability for diabetes in patients"
+author:
+- Akhil Ganti
+graphics: yes
+output:
+  pdf_document:
+    toc: no
+    toc_depth: 2
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    toc: no
+subtitle: STAT 471/571/701, Fall 2017
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{}
+- \fancyfoot[LE,RO]{\thepage}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy=TRUE, fig.width=6,  fig.height=5, 
+                      fig.align='left', dev = 'pdf')
+```
+
+```{r, echo=F}
+suppressMessages(library(car))
+suppressMessages(library(glmnet))
+suppressMessages(library(pROC))
+
+full_data <- read.csv("diabetic.data.csv", header=T)
+cleaned_data <- read.csv("readmission.csv", header=T)
+cleaned_data$readmitted <- as.factor(ifelse(cleaned_data$readmitted == '<30', 1, 0))
+
+cleaned_data[which(cleaned_data$race == "?"), 3] <- NA
+cleaned_data[which(cleaned_data$gender == "Unknown/Invalid"), 4] <- NA
+cleaned_data <- na.omit(cleaned_data)
+cleaned_data$race <- factor(cleaned_data$race)
+cleaned_data$gender <- factor(cleaned_data$gender)
+cleaned_data$not_unique <- as.factor(as.integer(duplicated(cleaned_data$patient_nbr)))
+
+fit1.cv <- readRDS('fit1_cv.rds')
+fit1.1se.glm.insig <- readRDS('fit1_1se_glm_insig.rds')
+fit1.1se.glm.Anova.insig <- readRDS('fit1_1se_glm_Anova_insig.rds')
+fit1.1se.glm <- readRDS('fit1_1se_glm.rds')
+fit1.1se.glm.Anova <- readRDS('fit1_1se_glm_Anova.rds')
+fit1.1se.glm.roc <- readRDS('fit1_1se_glm_roc.rds')
+
+fit2.cv <- readRDS('fit2_cv.rds')
+fit2.min.glm <- readRDS('fit2_min_glm.rds')
+fit2.min.glm.Anova <- readRDS('fit2_min_glm_Anova.rds')
+fit2.min.glm.roc <- readRDS('fit2_min_glm_roc.rds')
+
+fit3.cv <- readRDS('fit3_cv.rds')
+fit3.1se.glm <- readRDS('fit3_1se_glm.rds')
+fit3.1se.glm.Anova <- readRDS('fit3_1se_glm_Anova.rds')
+fit3.1se.glm.roc <- readRDS('fit3_1se_glm_roc.rds')
+
+fit4.cv <- readRDS('fit4_cv.rds')
+fit4.1se.glm.insig <- readRDS('fit4_1se_glm_insig.rds')
+fit4.1se.glm.Anova.insig <- readRDS('fit4_1se_glm_Anova_insig.rds')
+fit4.1se.glm <- readRDS('fit4_1se_glm.rds')
+fit4.1se.glm.Anova <- readRDS('fit4_1se_glm_Anova.rds')
+fit4.1se.glm.roc <- readRDS('fit4_1se_glm_roc.rds')
+```
+
+# Executive Summary
+
+As diabetes is a chronic medical condition that affects a large number of Americans every year, improper management can lead to patients being repeatedly readmitted to hospitals. These readmissions constitute an especially grievous problem that is indicative of the healthcare system not being able to provide adequate support to patients as well as large costs that are incurred as a result. It is highly important then to be able to identify factors that can aid in predicting which patients are more likely to be readmitted and act accordingly.
+
+Sourced from the Center for Clinical and Translational Research at Virginia Commonwealth University, the data used covers diabetes patients across 130 hopsitals in the time from 1998 to 2008 and has over 100,000 unique hospital admissions and about 70,000 corresponding unique patients. I use this data to identify the factors predicting whether or not a given patient will be readmitted within 30 days as well as to create a classification rule for this prediction.
+
+The priamry method used in my analysis focused on the selection of the most important features through regularized logistic regression by 10-fold cross validation. After creating and testing between several models, the final one chosen (constructed instead through elastic net regularization) consisted of the following variables: number of emergency visits by the patient in the year prior to the current encounter, number of inpatient visits by the patient in the year prior to the current encounter, total number of diagnoses entered for the patient, results of the insulin test, whether any diabetes medication was prescribed, where the patient was discharged to after treatment, age, the ICD9 codes for the primary and tertiary diagnoses of the patient, and whether the patient was a repeat admit.
+
+## Concerns & Limitations
+
+The limitations of this analysis stem both from flaws in the dataset as well as in the methods used to produce the final model. As this data only covers 130 hospitals, it is possible that it does not represent the total population fully and accurately, so certain conclusions drawn may in fact be specific only to the sample used here. In addition, due to the inherent variety among these hospitals, there is the risk that the data itself was not collected uniformly across, which would also potentially skew the final results. A final concern occurs due to the time period in which the data was collected. Since the time span was across nine years, it's more likely than not that procedural changes occurred in hospitals that would have altered the collection of the data itself.
+
+# Summary of Data
+
+As mentioned above, the data has over 100,000 unique hospital admissions and about 70,000 unique patients, with approximately 50 features. However, for the purpose of this analysis, the provided cleaned dataset is used instead, which contains only 31 variables. While there are no missing values, in the race column, 2273 patients are marked as "?", and in the gender column, 3 are marked as "Unknown/Invalid". Given that these entries comprise only about 2% of the whole dataset, I decided to omit them altogether. In addition, I created an additional variable called "not_unique", which indicates whether a patient, based on his/her ID, is a repeat admit. After transforming the response variable into an indicator variable, we can see that 11169 patients were readmitted in less than 30 days (11.22% of the observations), while the other 88323 were either not readmitted again or were readmitted after 30 days. Note that in creating the models, all variables except "encounter_id" and "patient_nbr" are used. See figure 1 in the appendix for a summary of the (cleaned) dataset.
+
+## Exploratory Data Analysis
+
+We will look at plots of some of the different features (both numeric and factor) against the readmitted indictator to get a better sense of the data as a whole. We first look at some of the demographic information, namely race and gender. See figures 2 and 3 in the appendix.
+
+It seems that neither race nor gender has any distinguishing characteristics for readmitted patients. One variable that might be expected to be separating, however, is the number of distinct medications prescribed in the current encounter, since it's reasonable to think that more prescriptions implies worse health and consequently a higher chance of readmission. See figure 4 in the appendix.
+
+Surprisingly, although the mean of the positive response is slightly higher, the distributions appear extremely close. We next look at the "not_unique" variable that was created, since it is reasonable to expect that patients who are repeat admits are more likely to be readmitted in less than 30 days. See figure 5 in the appendix.
+
+As expected, there is a measurable difference in the response based solely on this variable. The next variable that we look at it is the total number of diagnoses entered for a patient. The line of reasoning here is that, with a higher number of diagnoses, there is likely to be more uncertaintiy surrounding the patient's condition, which might be a contributing factor to the patient's quick readmission. See figure 6 in the appendix.
+
+The graph confirms the expectation with a higher mean and smaller distribution for the positive responses. The final variable we look at is age, since it is expected that older patients are more likely to have higher readmission probabilities due to overall health complications that are associated with aging. See figure 7 in the appendix.
+
+Surprisingly, there does not seem to be a distinguishing difference in the response based solely on age.
+
+# Analyses
+
+## Factor Identification
+
+As mentioned in the executive summary, LASSO logistic regression (through the glmnet package) by 10-fold cross-validation was used to select a subset of the most predictive variables. The default deviance type.measure parameter was used as well, while the other measurement possibilites will be used later in determining a final model. See figure 8 in the appendix for a plot of the binomial deviance against log(lambda) and figure 9 for the Anova table of the logistic model constructed from the chosen variables (with s = "lambda.1se").
+
+We can see that all of the variables are significant at the 0.05 level except for time_in_hospital and number_diagnoses. While time_in_hospital will be removed to construct a new model, I chose to keep number_diagnoses based on the fact that it's still significant at the 0.1 level as well as because it seems to have some distinguishing power based on the plot in figure 6. The resulting model consists of the variables num_medications, number_emergency, number_inpatient, number_diagnoses, metformin, insulin, diabetesMed, disch_disp_modified, age_mod, diag1_mod, diag2_mod, diag3_mod, and not_unique. From the ANOVA table for this model (figure 10), we see that all variables are significant. A summary of the coefficients themselves can be seen in figure 11 with a corresponding ROC curve in figure 12.
+
+Looking at some of the coefficients themselves, we see that the probability of readmission is positively correlated with the number of medications, number of emergency visits, number of inpatient visits, whether the patient was prescribed diabetes medications, and number of diagnoses. All of these make sense since they are all either indicative of worse overall health (the first four) or uncertainty about the patient's condition (the fifth). Unsurprisngly, being a repeat admit also increases the chance of readmission within 30 days.
+
+In addition, based on the age coefficients, there seems to be the overall trend that older people are more likely to be readmitted, though it's interesting to note that people between 60 and 79 years have a greater probability of readmission than people older than 80 years, though this paticular result could possibly be attributed to the large difference in sample size for each category.
+
+Where a patient is discharged to after treatment also is positively correlated with readmission - those who aren't discharged to their homes have a higher chance of readmission than those who are, and this is easily explained since a patient not being discharged to his/her home implies a relatively more serious condition.
+
+## Model Selection and Classification
+
+As mentioned above, two additional models were created by running cv.glmnet using the "mce" and "auc" type.measure values instead of "deviance." While "lambda.1se" was used to extract coefficients from the AUC model, "lambda.min" had to be used for the MCE model since, interestingly, it produced only the intercept under "lambda.1se." Note that the AUC model produced the same variables both before and after removing insignificant variables as the full-LASSO deviance model (abbreviated as FLD onwards). The MCE against log(lambda) curve can be seen in figure 13 in the appendix and the AUC against log(lambda) can be seen in figure 14, with the respective ROC curves based on the resulting models in the subsequent two figures.
+
+In addition, one more model was created using the deviance as type.measure but with elastic net regularization instead, setting alpha to 0.99. Similar to the FLD model, there were some insignificant variables (see figure 17) that were removed in constructing the model, the ANOVA of which is in figure 18. It should be noted here that, in contrast to the FLD model, the variables num_medications, metformin, and diag2_mod were zeroed out.
+
+We now have four candidate models from which to select the final one: the FLD deviance model, the MCE model, the AUC model, and the elastic net deviance model. However, given that the AUC model is equivalent to the FLD model, we really only have three models to consider. Using the given ratio that it costs approximately twice as much to misclassify a readmission than to misclassify a non-readmission, the resulting Bayesian classificaiton rule is to predict as readmission if the logistic probability is greater than $\frac{1}{3}$. Calculating the MCEs for these models, we get:
+
+FLD Model:
+```{r, echo=F}
+fit1.pred.bayes <- rep(0, length(cleaned_data$readmitted))
+fit1.pred.bayes[fit1.1se.glm$fitted > 1/3] = 1 
+MCE.fit1.bayes <- (sum(fit1.pred.bayes[cleaned_data$readmitted == 0] != 0) 
+           + sum(2*(fit1.pred.bayes[cleaned_data$readmitted == 1] != 1)))/length(cleaned_data$readmitted)
+MCE.fit1.bayes
+```
+
+MCE Model:
+```{r, echo=F}
+fit2.pred.bayes <- rep(0, length(cleaned_data$readmitted))
+fit2.pred.bayes[fit2.min.glm$fitted > 1/3] = 1
+MCE.fit2.bayes <- (sum(fit2.pred.bayes[cleaned_data$readmitted == 0] != 0) 
+           + sum(2*(fit2.pred.bayes[cleaned_data$readmitted == 1] != 1)))/length(cleaned_data$readmitted)
+MCE.fit2.bayes
+```
+
+Elastic Net Deviance Model:
+```{r, echo=F}
+fit4.pred.bayes <- rep(0, length(cleaned_data$readmitted))
+fit4.pred.bayes[fit4.1se.glm$fitted > 1/3] = 1
+MCE.fit4.bayes <- (sum(fit4.pred.bayes[cleaned_data$readmitted == 0] != 0) 
+           + sum(2*(fit4.pred.bayes[cleaned_data$readmitted == 1] != 1)))/length(cleaned_data$readmitted)
+MCE.fit4.bayes
+```
+
+Oddly, the MCE model has a higher MCE than the FLD model, though this is most likely because of my choice to remove the insignificant variables in the latter as well as due to incorporated unequal loss. In addition, given that these values are so close to each other, the difference is most likely not meaningful. However, it's important to note here that the elastic net model has the lowest MCE. We now look at the AUC values:
+
+FLD Model:
+```{r, echo=F}
+fit1.1se.glm.roc$auc
+```
+
+MCE Model:
+```{r, echo=F}
+fit2.min.glm.roc$auc
+```
+
+Elastic Net Deviance Model:
+```{r, echo=F}
+fit4.1se.glm.roc$auc
+```
+
+As expected, the FLD model (which the AUC model is equivalent to) has the highest AUC value, with the MCE model having the lowest AUC. Even though the elastic net model is only slightly better than the FLD model in terms of MCE and worse by a greater amount in terms of AUC, I nonetheless choose the elastic net model to be the final model due to its comparable performance and greater parsimony.
+
+# Conclusion
+
+The final model, constructed through elastic net regularization and based on binomial deviance, consisted of the variables number_emergency, number_inpatient, number_diagnoses, insulin, diabetesMed, disch_disp_modified, age_mod, diag1_mod, diag3_mod, and not_unique. This model was able to achieve a Bayesian misclassification error of 22.245% and an AUC of 0.6571. While this is marginally worse than the other tested models, overall it is a good model due to being relatively more parsimonious. Based on this, my initial recommendation would be to utilize this model to predict whether a given new patient will be readmitted, and in the meantime collect more data that relates more directly to the occurrence of diabetes in patients to help improve the model's accuracy in future iterations. In addition, further research could be conducted to see if there are any significant interactions between variables or if any meaningful transformations could be performed to increase predictive power.
+
+# Appendix
+
+Note that because of the large amount of time taken to compute the different variables (e.g. fit1.cv, etc.), all code (which can be seen below after figure 18) was run in a separate file and the variables were saved in .rds files, which were then loaded above to speed up the knitting of this .rmd file.
+
+## Figure 1 - Summary of Dataset
+```{r, echo=F}
+summary(cleaned_data)
+```
+
+## Figure 2 - readmitted vs race
+```{r, echo=F}
+plot(cleaned_data$readmitted, cleaned_data$race)
+```
+
+## Figure 3 - readmitted vs gender
+```{r, echo=F}
+plot(cleaned_data$readmitted, cleaned_data$gender)
+```
+
+## Figure 4 - readmitted vs num_medications
+```{r, echo=F}
+plot(cleaned_data$readmitted, cleaned_data$num_medications)
+```
+
+## Figure 5 - readmitted vs not_unique
+```{r, echo=F}
+plot(cleaned_data$readmitted, cleaned_data$not_unique)
+```
+
+## Figure 6 - readmitted vs number_diagnoses
+```{r, echo=F}
+plot(cleaned_data$readmitted, cleaned_data$number_diagnoses)
+```
+
+## Figure 7 - readmitted vs age_mod
+```{r, echo=F}
+plot(cleaned_data$readmitted, cleaned_data$age_mod)
+```
+
+## Figure 8 - Binomial Deviance vs log(Lambda)
+```{r, echo=F}
+plot(fit1.cv)
+```
+
+## Figure 9 - ANOVA with insignificant variables
+```{r, echo=F}
+fit1.1se.glm.Anova.insig
+```
+
+## Figure 10 - ANOVA with no insignificant variables
+```{r, echo=F}
+fit1.1se.glm.Anova
+```
+
+## Figure 11 - Summary of FLD Model
+```{r, echo=F}
+summary(fit1.1se.glm)
+```
+
+## Figure 12 - ROC Curve of FLD Model
+```{r, echo=F}
+plot(fit1.1se.glm.roc)
+```
+
+## Figure 13 - Misclassification Error vs log(Lambda)
+```{r, echo=F}
+plot(fit2.cv)
+```
+
+## Figure 14 - AUC vs log(Lambda)
+```{r, echo=F}
+plot(fit3.cv)
+```
+
+## Figure 15 - ROC Curve of MCE Model
+```{r, echo=F}
+plot(fit2.min.glm.roc)
+```
+
+## Figure 16 - ROC Curve of AUC Model
+```{r, echo=F}
+plot(fit3.1se.glm.roc)
+```
+
+## Figure 17 - Elastic Net ANOVA with insignificant variables
+```{r, echo=F}
+fit4.1se.glm.Anova.insig
+```
+
+## Figure 18 - Elastic Net ANOVA with no insignificant variables
+```{r, echo=F}
+fit4.1se.glm.Anova
+```
+
+```{r, echo=F}
+library(car)
+library(glmnet)
+library(pROC)
+
+full_data <- read.csv("diabetic.data.csv", header=T)
+cleaned_data <- read.csv("readmission.csv", header=T)
+cleaned_data$readmitted <- as.factor(ifelse(cleaned_data$readmitted == '<30', 1, 0))
+
+cleaned_data[which(cleaned_data$race == "?"), 3] <- NA
+cleaned_data[which(cleaned_data$gender == "Unknown/Invalid"), 4] <- NA
+cleaned_data <- na.omit(cleaned_data)
+cleaned_data$race <- factor(cleaned_data$race)
+cleaned_data$gender <- factor(cleaned_data$gender)
+cleaned_data$not_unique <- as.factor(as.integer(duplicated(cleaned_data$patient_nbr)))
+
+X <- model.matrix(readmitted ~ . -encounter_id -patient_nbr, cleaned_data)[,-1]
+Y <- cleaned_data$readmitted
+
+set.seed(10)
+fit1.cv <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds = 10, type.measure = "deviance")
+coef1.1se <- coef(fit1.cv, s = "lambda.1se")  
+coef1.1se <- coef1.1se[which(coef1.1se != 0), ] 
+fit1.1se.glm.insig <- glm(readmitted ~ time_in_hospital + num_medications + number_emergency + 
+                     number_inpatient + number_diagnoses + metformin + insulin + 
+                     diabetesMed + disch_disp_modified + age_mod + diag1_mod + 
+                     diag2_mod + diag3_mod + not_unique, family="binomial", data=cleaned_data)
+fit1.1se.glm.Anova.insig <- Anova(fit1.1se.glm.insig)
+fit1.1se.glm <- glm(readmitted ~ num_medications + number_emergency + 
+                      number_inpatient + number_diagnoses + metformin + insulin + 
+                      diabetesMed + disch_disp_modified + age_mod + diag1_mod + 
+                      diag2_mod + diag3_mod + not_unique, family="binomial", data=cleaned_data)
+fit1.1se.glm.Anova <- Anova(fit1.1se.glm)
+fit1.1se.glm.roc <- roc(cleaned_data$readmitted, fit1.1se.glm$fitted.values, plot=T, col="blue")
+saveRDS(fit1.cv, 'fit1_cv.rds')
+saveRDS(fit1.1se.glm.insig, 'fit1_1se_glm_insig.rds')
+saveRDS(fit1.1se.glm.Anova.insig, 'fit1_1se_glm_Anova_insig.rds')
+saveRDS(fit1.1se.glm, 'fit1_1se_glm.rds')
+saveRDS(fit1.1se.glm.Anova, 'fit1_1se_glm_Anova.rds')
+saveRDS(fit1.1se.glm.roc, 'fit1_1se_glm_roc.rds')
+
+set.seed(11)
+fit2.cv <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds = 10, type.measure = "class")
+coef2.min <- coef(fit2.cv, s = "lambda.min")  
+coef2.min <- coef2.min[which(coef2.min != 0), ] 
+fit2.min.glm <- glm(readmitted ~ time_in_hospital + number_inpatient + number_diagnoses + 
+                      disch_disp_modified + not_unique, family="binomial", data=cleaned_data)
+fit2.min.glm.Anova <- Anova(fit2.min.glm)
+fit2.min.glm.roc <- roc(cleaned_data$readmitted, fit2.min.glm$fitted.values, plot=T, col="blue")
+saveRDS(fit2.cv, 'fit2_cv.rds')
+saveRDS(fit2.min.glm, 'fit2_min_glm.rds')
+saveRDS(fit2.min.glm.Anova, 'fit2_min_glm_Anova.rds')
+saveRDS(fit2.min.glm.roc, 'fit2_min_glm_roc.rds')
+
+set.seed(12)
+fit3.cv <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds = 10, type.measure = "auc")
+coef3.1se <- coef(fit3.cv, s = "lambda.1se")  
+coef3.1se <- coef3.1se[which(coef3.1se != 0), ] 
+fit3.1se.glm.insig <- glm(readmitted ~ time_in_hospital + num_medications + number_emergency + 
+                      number_inpatient + number_diagnoses + A1Cresult + metformin + insulin + 
+                      diabetesMed + disch_disp_modified + age_mod + diag1_mod + diag2_mod + 
+                      diag3_mod + not_unique, family="binomial", data=cleaned_data)
+fit3.1se.glm.Anova.insig <- Anova(fit3.1se.glm.insig)
+fit3.1se.glm <- fit1.1se.glm
+fit3.1se.glm.Anova <- fit1.1se.glm.Anova
+fit3.1se.glm.roc <- fit1.1se.glm.roc
+saveRDS(fit3.cv, 'fit3_cv.rds')
+saveRDS(fit3.1se.glm.insig, 'fit3_1se_glm_insig.rds')
+saveRDS(fit3.1se.glm.Anova.insig, 'fit3_1se_glm_Anova_insig.rds')
+saveRDS(fit3.1se.glm, 'fit3_1se_glm.rds')
+saveRDS(fit3.1se.glm.Anova, 'fit3_1se_glm_Anova.rds')
+saveRDS(fit3.1se.glm.roc, 'fit3_1se_glm_roc.rds')
+
+set.seed(13)
+fit4.cv <- cv.glmnet(X, Y, alpha=0.99, family="binomial", nfolds = 10, type.measure = "deviance")
+coef4.1se <- coef(fit4.cv, s = "lambda.1se")  
+coef4.1se <- coef4.1se[which(coef4.1se != 0), ]
+fit4.1se.glm.insig <- glm(readmitted ~ time_in_hospital + num_medications + number_emergency + 
+                      number_inpatient + number_diagnoses + insulin + diabetesMed + disch_disp_modified + 
+                      age_mod + diag1_mod + diag3_mod + not_unique, family="binomial", data=cleaned_data)
+fit4.1se.glm.Anova.insig <- Anova(fit4.1se.glm.insig)
+fit4.1se.glm <- glm(readmitted ~ number_emergency + number_inpatient + number_diagnoses + 
+                            insulin + diabetesMed + disch_disp_modified + age_mod + diag1_mod + 
+                            diag3_mod + not_unique, family="binomial", data=cleaned_data)
+fit4.1se.glm.Anova <- Anova(fit4.1se.glm)
+fit4.1se.glm.roc <- roc(cleaned_data$readmitted, fit4.1se.glm$fitted.values, plot=T, col="blue")
+saveRDS(fit4.cv, 'fit4_cv.rds')
+saveRDS(fit4.1se.glm.insig, 'fit4_1se_glm_insig.rds')
+saveRDS(fit4.1se.glm.Anova.insig, 'fit4_1se_glm_Anova_insig.rds')
+saveRDS(fit4.1se.glm, 'fit4_1se_glm.rds')
+saveRDS(fit4.1se.glm.Anova, 'fit4_1se_glm_Anova.rds')
+saveRDS(fit4.1se.glm.roc, 'fit4_1se_glm_roc.rds')
+```
